@@ -1,30 +1,56 @@
-const SerialPort = require("serialport");
-const VEDirectParser = require("./parser");
-const { EventEmitter } = require("events");
+const VEDirect = require('./VEDirect');
 
-class VEDirect extends EventEmitter {
-  constructor(path) {
-    super();
+module.exports = function (RED) {
+  function VEDirectNode(config) {
+    RED.nodes.createNode(this, config);
+    const node = this;
 
-    this.serial = new SerialPort(path, {
-      baudRate: 19200,
-      dataBits: 8,
-      parity: 'none',
+    // Initial port setup
+    let veDirectInstance = new VEDirect(config.port);
+
+    // Listen for data events from VE.Direct and forward them as Node-RED messages
+    veDirectInstance.on("data", (data) => {
+      node.send({ payload: data });
     });
 
-    this.rl = new SerialPort.parsers.Delimiter({
-      delimiter: Buffer.from([0x0d, 0x0a], 'hex'),
-      includeDelimiter: false
+    // Handle dynamic port changes
+    node.on("input", (msg) => {
+      if (msg.topic === "changePort" && msg.payload.port) {
+        let newPort = msg.payload.port;
+        
+        // Check if the port is actually changing to avoid redundant reinitialization
+        if (newPort !== config.port) {
+          config.port = newPort; // Update the configuration port
+
+          // Close the existing port connection before reopening on a new port
+          if (veDirectInstance.serial.isOpen) {
+            veDirectInstance.serial.close((err) => {
+              if (err) {
+                node.error(`Error closing serial port: ${err.message}`);
+              } else {
+                node.log(`Serial port closed. Reopening on ${newPort}`);
+                veDirectInstance = new VEDirect(newPort); // Reinitialize with new port
+
+                // Rebind the data event to send data over Node-RED messages
+                veDirectInstance.on("data", (data) => {
+                  node.send({ payload: data });
+                });
+              }
+            });
+          }
+        } else {
+          node.warn(`Port ${newPort} is already in use.`);
+        }
+      }
     });
 
-    this.ve = new VEDirectParser();
-
-    this.ve.on("data", (data) => {
-      this.emit("data", data);
+    // Clean up when node is closed
+    node.on("close", () => {
+      if (veDirectInstance.serial.isOpen) {
+        veDirectInstance.serial.close();
+      }
     });
-
-    this.serial.pipe(this.rl).pipe(this.ve);
   }
-}
 
-module.exports = VEDirect;
+  RED.nodes.registerType("vedirect", VEDirectNode);
+};
